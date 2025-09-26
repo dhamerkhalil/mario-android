@@ -1,4 +1,4 @@
-name: Android Debug APK
+name: Android Debug - Test on Emulator & Release
 
 on:
   push:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-debug:
+  build-test-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # Use ONLY the runner's preinstalled SDK
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -31,6 +31,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install basic tools (unzip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
       # Ensure required SDK components exist in the SAME SDK path
       - name: Ensure Android SDK components
         run: |
@@ -42,6 +47,8 @@ jobs:
           yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses || true
           "$SDKM" --sdk_root="$ANDROID_HOME" \
             "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          # quick list check (noisy output suppressed)
+          "$SDKM" --sdk_root="$ANDROID_HOME" --list >/dev/null || true
 
       # Make Gradle use this SDK regardless of env ambiguity
       - name: Pin SDK path in local.properties
@@ -70,44 +77,25 @@ jobs:
 
       - name: Build Debug APK (assembleDebug)
         run: |
-          set -eux
+          set -euxo pipefail
           cd android
           chmod +x ./gradlew || true
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      # 🔎 Inspect APK so we can catch why phones won't parse it
-      - name: Verify APK (signature + manifest + ABI)
+      # Inspect APK to catch issues like minSdk / ABI / signature that cause "cannot parse"
+      - name: Verify APK (signature + manifest + ABIs)
+        id: inspect
         run: |
+          set -euxo pipefail
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          echo "APK=$APK" >> $GITHUB_ENV
           ls -lh "$APK"
+
           "$ANDROID_HOME/build-tools/33.0.2/apksigner" verify --print-certs "$APK"
-          "$ANDROID_HOME/build-tools/33.0.2/aapt" dump badging "$APK" | sed -n '1,80p' || true
-          echo "---- Listing .so ABIs present (if any) ----"
-          unzip -l "$APK" | awk '{print $4}' | grep -E '^lib/.+/.+\.so$' | cut -d/ -f2 | sort -u || true
 
-      # Optional: artifact (note: Artifacts are ZIP containers when you download from Actions UI)
-      - name: Upload Debug APK artifact (zipped by GitHub)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 7
+          # Extract package and launchable activity for later steps
+          PKG=$("$ANDROID_HOME/build-tools/33.0.2/aapt" dump badging "$APK" | awk -F"'" '/package: name=/{print $2}')
+          ACT=$("$ANDROID_HOME/build-tools/33.0.2/aapt" dump badging "$APK" | awk -F"'" '/launchable-activity: name=/{print $2}')
+          echo "PKG=$PKG" >> $GITHUB_ENV
+          echo "ACT=$ACT" >> $GITHUB_ENV
 
-      # 🏷️ Create a unique prerelease tag and upload the RAW .apk to Releases
-      - name: Prepare tag for release
-        id: tag
-        run: |
-          TS=$(date -u +'%Y%m%d-%H%M%S')
-          TAG="debug-$TS-${GITHUB_SHA::7}"
-          echo "name=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release (debug)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: "Debug build ${{ steps.tag.outputs.name }}"
-          prerelease: true
-          draft: false
-          files: android/app/build/outputs/apk/debug/app-debug.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
